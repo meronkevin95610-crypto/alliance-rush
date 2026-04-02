@@ -1,38 +1,27 @@
-﻿Pour que ton bot fonctionne sur Render 24h/24 sans s'endormir (en utilisant cron-job.org), il faut ajouter un petit serveur HTTP à ton code Python. Render utilise la variable d'environnement PORT pour exposer ton application.
-
-Voici ton code complet et optimisé pour Render.
-
-Modifications apportées :
-Serveur Flask intégré : Un serveur web léger tourne en parallèle du bot Discord.
-
-Gestion du Port : Récupère automatiquement le port assigné par Render.
-
-Variable d'environnement : Remplacement du Token par une variable OS (plus sécurisé).
-
-Python
-import discord
+﻿import discord
 from discord.ext import commands, tasks
 from discord import app_commands
 import json
 import os
 import threading
-from flask import Flask # Nécessite 'pip install flask'
+from flask import Flask
 
 # --- CONFIGURATION DU SERVEUR WEB (POUR RENDER) ---
+# Ce serveur permet à cron-job.org de "pinger" le bot pour éviter la mise en veille.
 app = Flask('')
 
 @app.route('/')
 def home():
-    return "Bot en ligne !"
+    return "Le bot Alliance est opérationnel !"
 
 def run_web_server():
-    # Render donne un port via la variable d'environnement PORT
+    # Render utilise la variable d'environnement PORT
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
 # --- CONFIGURATION DU BOT ---
-# Utilise une variable d'environnement sur Render pour le TOKEN
-TOKEN = os.environ.get("DISCORD_TOKEN") 
+# Récupération sécurisée du Token via les variables d'environnement Render
+TOKEN = os.environ.get("DISCORD_TOKEN")
 DATA_FILE = "stats_rush_event.json"
 DASHBOARD_CHANNEL_ID = 1473418141160837140 
 
@@ -47,7 +36,7 @@ def load_data():
         try:
             with open(DATA_FILE, "r", encoding='utf-8') as f:
                 return json.load(f)
-        except:
+        except Exception:
             return {"users": {}}
     return {"users": {}}
 
@@ -92,21 +81,22 @@ class CombatWizard(discord.ui.View):
     )
     async def select_guilde(self, interaction: discord.Interaction, select: discord.ui.Select):
         self.guildes_choisies = select.values
-        if len(self.guildes_choisies) > 1:
-            self.mixte = True
+        self.mixte = len(self.guildes_choisies) > 1
             
         view = discord.ui.View()
         types = [("Prisme", "Prisme"), ("Perco (Atk)", "Perco_Atk"), ("Perco (Def)", "Perco_Def")]
         for label, val in types:
             btn = discord.ui.Button(label=label, style=discord.ButtonStyle.primary)
-            async def cb(inter, v=val):
-                self.type_combat = v
-                if v == "Perco_Def": 
-                    self.format = "4v4"
-                    await self.show_issue(inter)
-                else: 
-                    await self.show_format(inter)
-            btn.callback = cb
+            async def make_callback(v):
+                async def callback(inter):
+                    self.type_combat = v
+                    if v == "Perco_Def": 
+                        self.format = "4v4"
+                        await self.show_issue(inter)
+                    else: 
+                        await self.show_format(inter)
+                return callback
+            btn.callback = await make_callback(val)
             view.add_item(btn)
         
         await interaction.response.edit_message(
@@ -118,10 +108,12 @@ class CombatWizard(discord.ui.View):
         formats = [("4v4 Full", "4v4"), ("4v3/2 Partiel", "4v3/2"), ("4v1/0 No Def", "4v1/0")]
         for label, val in formats:
             btn = discord.ui.Button(label=label, style=discord.ButtonStyle.secondary)
-            async def cb(inter, v=val):
-                self.format = v
-                await self.show_issue(inter)
-            btn.callback = cb
+            async def make_callback(v):
+                async def callback(inter):
+                    self.format = v
+                    await self.show_issue(inter)
+                return callback
+            btn.callback = await make_callback(val)
             view.add_item(btn)
         await interaction.response.edit_message(content="**Étape 3 :** Format adverse ?", view=view)
 
@@ -129,15 +121,18 @@ class CombatWizard(discord.ui.View):
         view = discord.ui.View()
         for res in ["Victoire", "Défaite"]:
             btn = discord.ui.Button(label=res, style=discord.ButtonStyle.success if res=="Victoire" else discord.ButtonStyle.danger)
-            async def cb(inter, r=res):
-                self.issue = r
-                await self.show_bonus(inter)
-            btn.callback = cb
+            async def make_callback(r):
+                async def callback(inter):
+                    self.issue = r
+                    await self.show_bonus(inter)
+                return callback
+            btn.callback = await make_callback(res)
             view.add_item(btn)
         await interaction.response.edit_message(content="**Étape 4 :** Résultat ?", view=view)
 
     async def show_bonus(self, interaction):
         view = discord.ui.View()
+        
         btn_mixte = discord.ui.Button(label="Team Mixte ✅" if self.mixte else "Team Mixte ?", style=discord.ButtonStyle.blurple)
         async def cb_m(inter):
             self.mixte = not self.mixte
@@ -152,8 +147,11 @@ class CombatWizard(discord.ui.View):
 
         btn_fin = discord.ui.Button(label="VALIDER ET ENVOYER SCREEN", style=discord.ButtonStyle.green, row=1)
         btn_fin.callback = self.finish
-        view.add_item(btn_mixte); view.add_item(btn_long); view.add_item(btn_fin)
-        await interaction.response.edit_message(content="**Dernière étape :** Bonus ?", view=view)
+        
+        view.add_item(btn_mixte)
+        view.add_item(btn_long)
+        view.add_item(btn_fin)
+        await interaction.response.edit_message(content="**Dernière étape :** Bonus éventuels ?", view=view)
 
     async def finish(self, interaction: discord.Interaction):
         pts = 0
@@ -185,9 +183,9 @@ class CombatWizard(discord.ui.View):
             if win: data["users"][uid]["w"] += 1
             else: data["users"][uid]["l"] += 1
             save_data(data)
-            await msg.reply(f"✅ Combat validé ! +{pts} pts.")
-        except:
-            await interaction.followup.send("⏳ Temps écoulé pour le screen.", ephemeral=True)
+            await msg.reply(f"✅ Combat validé ! +{pts} pts pour **{self.user.display_name}**.")
+        except Exception:
+            await interaction.followup.send("⏳ Temps écoulé pour l'envoi du screenshot.", ephemeral=True)
 
 # --- SETUP DU BOT ---
 class RushBot(commands.Bot):
@@ -214,13 +212,16 @@ class RushBot(commands.Bot):
 
 bot = RushBot()
 
-@bot.tree.command(name="ajouter_combat", description="Enregistrer un nouveau combat")
+@bot.tree.command(name="ajouter_combat", description="Enregistrer un nouveau combat de rush")
 async def add(interaction: discord.Interaction):
-    await interaction.response.send_message("Initialisation...", view=CombatWizard(interaction.user, bot), ephemeral=True)
+    await interaction.response.send_message("Initialisation du formulaire...", view=CombatWizard(interaction.user, bot), ephemeral=True)
 
 # --- LANCEMENT ---
 if __name__ == "__main__":
-    # Lancer le serveur Flask dans un thread séparé
-    threading.Thread(target=run_web_server).start()
-    # Lancer le bot Discord
-    bot.run(TOKEN)
+    # Lancement du serveur Web pour Render
+    threading.Thread(target=run_web_server, daemon=True).start()
+    # Lancement du bot Discord
+    if TOKEN:
+        bot.run(TOKEN)
+    else:
+        print("ERREUR : Le TOKEN Discord est introuvable dans les variables d'environnement.")
