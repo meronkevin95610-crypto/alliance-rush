@@ -1,4 +1,4 @@
-﻿import discord
+import discord
 from discord.ext import commands, tasks
 from discord import app_commands
 import json
@@ -6,8 +6,7 @@ import os
 import threading
 from flask import Flask
 
-# --- CONFIGURATION DU SERVEUR WEB (POUR RENDER) ---
-# Ce serveur permet à cron-job.org de "pinger" le bot pour éviter la mise en veille.
+# --- CONFIGURATION DU SERVEUR WEB ---
 app = Flask('')
 
 @app.route('/')
@@ -15,20 +14,18 @@ def home():
     return "Le bot Alliance est opérationnel !"
 
 def run_web_server():
-    # Render utilise la variable d'environnement PORT
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
 # --- CONFIGURATION DU BOT ---
-# Récupération sécurisée du Token via les variables d'environnement Render
 TOKEN = os.environ.get("DISCORD_TOKEN")
 DATA_FILE = "stats_rush_event.json"
 DASHBOARD_CHANNEL_ID = 1473418141160837140 
 
 ALLIANCE_GUILDES = [
     "OLYMPE", "EXODE", "LACOSTE TN", "THE UNKNOWNS", "GUCCI MOB",
-    "OLD SCHOOL", "NONOOB", "STELLAR", "OLY2", "TU2", "STL2"
-]
+    "OLD SCHOOL", "NONOOB", "STELLAR" 
+] # Correction ici : ajout du crochet fermant
 
 # --- GESTION DES DONNÉES ---
 def load_data():
@@ -85,6 +82,7 @@ class CombatWizard(discord.ui.View):
             
         view = discord.ui.View()
         types = [("Prisme", "Prisme"), ("Perco (Atk)", "Perco_Atk"), ("Perco (Def)", "Perco_Def")]
+        
         for label, val in types:
             btn = discord.ui.Button(label=label, style=discord.ButtonStyle.primary)
             async def make_callback(v):
@@ -212,15 +210,43 @@ class RushBot(commands.Bot):
 
 bot = RushBot()
 
+# --- COMMANDES SLASH ---
+
 @bot.tree.command(name="ajouter_combat", description="Enregistrer un nouveau combat de rush")
 async def add(interaction: discord.Interaction):
     await interaction.response.send_message("Initialisation du formulaire...", view=CombatWizard(interaction.user, bot), ephemeral=True)
 
+@bot.tree.command(name="classement", description="Affiche le classement actuel du Rush")
+async def classement(interaction: discord.Interaction):
+    data = load_data()
+    embed = generate_leaderboard_embed(data)
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="admin_points", description="Modifier les points d'un joueur (Admin uniquement)")
+@app_commands.describe(membre="Le joueur à modifier", points="Nombre de points à ajouter (ou retirer avec -)")
+@app_commands.checks.has_permissions(administrator=True)
+async def admin_points(interaction: discord.Interaction, membre: discord.Member, points: int):
+    data = load_data()
+    uid = str(membre.id)
+    
+    if uid not in data["users"]:
+        data["users"][uid] = {"name": membre.display_name, "guilde": "INCONNUE", "pts": 0, "w": 0, "l": 0}
+    
+    old_pts = data["users"][uid]["pts"]
+    data["users"][uid]["pts"] += points
+    save_data(data)
+    
+    action = "ajoutés" if points > 0 else "retirés"
+    await interaction.response.send_message(f"✅ {abs(points)} points {action} à **{membre.display_name}**. (Ancien: {old_pts} | Nouveau: {data[ 'users'][uid]['pts']})", ephemeral=True)
+
+@admin_points.error
+async def admin_points_error(interaction: discord.Interaction, error):
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message("❌ Tu n'as pas la permission 'Administrateur' pour utiliser cette commande.", ephemeral=True)
+
 # --- LANCEMENT ---
 if __name__ == "__main__":
-    # Lancement du serveur Web pour Render
     threading.Thread(target=run_web_server, daemon=True).start()
-    # Lancement du bot Discord
     if TOKEN:
         bot.run(TOKEN)
     else:
