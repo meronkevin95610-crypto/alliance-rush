@@ -1,1 +1,1 @@
-worker: python "bot_alliance rush.py"
+web: python ton_fichier.py

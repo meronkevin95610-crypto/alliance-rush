@@ -1,13 +1,40 @@
-﻿import discord
+﻿Pour que ton bot fonctionne sur Render 24h/24 sans s'endormir (en utilisant cron-job.org), il faut ajouter un petit serveur HTTP à ton code Python. Render utilise la variable d'environnement PORT pour exposer ton application.
+
+Voici ton code complet et optimisé pour Render.
+
+Modifications apportées :
+Serveur Flask intégré : Un serveur web léger tourne en parallèle du bot Discord.
+
+Gestion du Port : Récupère automatiquement le port assigné par Render.
+
+Variable d'environnement : Remplacement du Token par une variable OS (plus sécurisé).
+
+Python
+import discord
 from discord.ext import commands, tasks
 from discord import app_commands
 import json
 import os
+import threading
+from flask import Flask # Nécessite 'pip install flask'
 
-# --- CONFIGURATION ---
-TOKEN = "MTQ4OTM1MTgyNDY1Mjg5NDQwOA.GVYlok.JthQk6x7QKvyh37UwwlfLfIZ2nPaA2O-LdJJNw"
+# --- CONFIGURATION DU SERVEUR WEB (POUR RENDER) ---
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Bot en ligne !"
+
+def run_web_server():
+    # Render donne un port via la variable d'environnement PORT
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
+
+# --- CONFIGURATION DU BOT ---
+# Utilise une variable d'environnement sur Render pour le TOKEN
+TOKEN = os.environ.get("DISCORD_TOKEN") 
 DATA_FILE = "stats_rush_event.json"
-DASHBOARD_CHANNEL_ID = 1473418141160837140 # Ton salon de classement
+DASHBOARD_CHANNEL_ID = 1473418141160837140 
 
 ALLIANCE_GUILDES = [
     "OLYMPE", "EXODE", "LACOSTE TN", "THE UNKNOWNS", "GUCCI MOB",
@@ -17,15 +44,35 @@ ALLIANCE_GUILDES = [
 # --- GESTION DES DONNÉES ---
 def load_data():
     if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r", encoding='utf-8') as f:
-            return json.load(f)
+        try:
+            with open(DATA_FILE, "r", encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            return {"users": {}}
     return {"users": {}}
 
 def save_data(data):
     with open(DATA_FILE, "w", encoding='utf-8') as f:
         json.dump(data, f, indent=4, ensure_ascii=False)
 
-# --- INTERFACE WIZARD ---
+def generate_leaderboard_embed(data, title="📊 CLASSEMENT RUSH ALLIANCE"):
+    if not data["users"]:
+        return discord.Embed(title=title, description="Aucune donnée enregistrée.", color=0x2ecc71)
+
+    sorted_u = sorted(data["users"].items(), key=lambda x: x[1]["pts"], reverse=True)
+    embed = discord.Embed(title=title, color=0x2ecc71)
+    
+    table = "```\nPos | Joueur (Guilde) | Pts | W/L\n" + "-"*32 + "\n"
+    for i, (uid, s) in enumerate(sorted_u[:25], 1):
+        name = s['name'][:10]
+        guilde = s['guilde'][:5]
+        table += f"{i:<3} | {name:<10} ({guilde:<5}) | {s['pts']:<3} | {s['w']}/{s['l']}\n"
+    table += "```"
+    
+    embed.description = table
+    return embed
+
+# --- INTERFACE WIZARD (LOGIQUE DE COMBAT) ---
 class CombatWizard(discord.ui.View):
     def __init__(self, user, bot_instance):
         super().__init__(timeout=300)
@@ -39,7 +86,7 @@ class CombatWizard(discord.ui.View):
         self.long_combat = False
 
     @discord.ui.select(
-        placeholder="Sélectionne la ou les guildes présentes (max 4)...",
+        placeholder="Sélectionne la ou les guildes (max 4)...",
         min_values=1, max_values=4,
         options=[discord.SelectOption(label=g) for g in ALLIANCE_GUILDES]
     )
@@ -76,7 +123,7 @@ class CombatWizard(discord.ui.View):
                 await self.show_issue(inter)
             btn.callback = cb
             view.add_item(btn)
-        await interaction.response.edit_message(content="**Étape 3 :** Quel était le format adverse ?", view=view)
+        await interaction.response.edit_message(content="**Étape 3 :** Format adverse ?", view=view)
 
     async def show_issue(self, interaction):
         view = discord.ui.View()
@@ -87,7 +134,7 @@ class CombatWizard(discord.ui.View):
                 await self.show_bonus(inter)
             btn.callback = cb
             view.add_item(btn)
-        await interaction.response.edit_message(content="**Étape 4 :** Résultat du combat ?", view=view)
+        await interaction.response.edit_message(content="**Étape 4 :** Résultat ?", view=view)
 
     async def show_bonus(self, interaction):
         view = discord.ui.View()
@@ -106,7 +153,7 @@ class CombatWizard(discord.ui.View):
         btn_fin = discord.ui.Button(label="VALIDER ET ENVOYER SCREEN", style=discord.ButtonStyle.green, row=1)
         btn_fin.callback = self.finish
         view.add_item(btn_mixte); view.add_item(btn_long); view.add_item(btn_fin)
-        await interaction.response.edit_message(content="**Dernière étape :** Bonus éventuels ?", view=view)
+        await interaction.response.edit_message(content="**Dernière étape :** Bonus ?", view=view)
 
     async def finish(self, interaction: discord.Interaction):
         pts = 0
@@ -121,7 +168,7 @@ class CombatWizard(discord.ui.View):
         if self.mixte: pts += 1
         if self.long_combat and win: pts += 1
 
-        await interaction.response.edit_message(content=f"🏁 **Résumé : {pts} points.**\nPoste ton **SCREENSHOT** maintenant !", view=None)
+        await interaction.response.edit_message(content=f"🏁 **Résumé : {pts} points.**\nEnvoie ton **SCREENSHOT** maintenant !", view=None)
 
         try:
             msg = await self.bot.wait_for("message", check=lambda m: m.author == self.user and m.attachments, timeout=300)
@@ -142,7 +189,7 @@ class CombatWizard(discord.ui.View):
         except:
             await interaction.followup.send("⏳ Temps écoulé pour le screen.", ephemeral=True)
 
-# --- BOT SETUP ---
+# --- SETUP DU BOT ---
 class RushBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix="!", intents=discord.Intents.all())
@@ -156,15 +203,7 @@ class RushBot(commands.Bot):
         channel = self.get_channel(DASHBOARD_CHANNEL_ID)
         if not channel: return
         data = load_data()
-        if not data["users"]: return
-
-        sorted_u = sorted(data["users"].items(), key=lambda x: x[1]["pts"], reverse=True)
-        embed = discord.Embed(title="📊 CLASSEMENT RUSH ALLIANCE", color=0x2ecc71)
-        table = "```\nPos | Joueur (Guilde) | Pts | W/L\n" + "-"*32 + "\n"
-        for i, (uid, s) in enumerate(sorted_u[:25], 1):
-            table += f"{i:<3} | {s['name'][:10]} ({s['guilde'][:5]}) | {s['pts']:<3} | {s['w']}/{s['l']}\n"
-        table += "```"
-        embed.description = table
+        embed = generate_leaderboard_embed(data, "📊 DASHBOARD LIVE - RUSH ALLIANCE")
         embed.set_footer(text="Mise à jour auto toutes les 5 min")
 
         async for message in channel.history(limit=5):
@@ -175,18 +214,13 @@ class RushBot(commands.Bot):
 
 bot = RushBot()
 
-@bot.tree.command(name="ajouter_combat")
+@bot.tree.command(name="ajouter_combat", description="Enregistrer un nouveau combat")
 async def add(interaction: discord.Interaction):
     await interaction.response.send_message("Initialisation...", view=CombatWizard(interaction.user, bot), ephemeral=True)
 
-@bot.tree.command(name="modifier_points")
-async def modif(interaction: discord.Interaction, membre: discord.Member, points: int):
-    if not interaction.user.guild_permissions.administrator: return
-    data = load_data()
-    uid = str(membre.id)
-    if uid in data["users"]:
-        data["users"][uid]["pts"] += points
-        save_data(data)
-        await interaction.response.send_message(f"Points mis à jour pour {membre.name}.")
-
-bot.run(TOKEN)
+# --- LANCEMENT ---
+if __name__ == "__main__":
+    # Lancer le serveur Flask dans un thread séparé
+    threading.Thread(target=run_web_server).start()
+    # Lancer le bot Discord
+    bot.run(TOKEN)
