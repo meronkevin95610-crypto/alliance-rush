@@ -1,20 +1,23 @@
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
-import json
 import os
 import threading
+from pymongo import MongoClient
 from flask import Flask
 from dotenv import load_dotenv
 
-# --- CONFIGURATION & DATA ---
-load_dotenv() 
+# --- CONFIGURATION ---
+load_dotenv()
 app = Flask('')
-DATA_FILE = "stats_rush_event.json"
-CONFIG_FILE = "config_rush.json"
-
-# Récupération du Token depuis l'environnement Render
+MONGO_URL = os.getenv("MONGO_URL")
 TOKEN = os.getenv("DISCORD_TOKEN")
+
+# Connexion MongoDB
+client = MongoClient(MONGO_URL)
+db = client["alliance_rush"]
+users_col = db["users"]
+config_col = db["config"]
 
 # IDs des Salons
 DASHBOARD_CHANNEL_ID = 1473418141160837140
@@ -26,33 +29,40 @@ ALLIANCE_GUILDES = [
     "OLD SCHOOL", "NONOOB", "STELLAR" 
 ]
 
+# --- GESTION DES DONNÉES (MONGODB) ---
 def load_data():
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE, "r", encoding='utf-8') as f: return json.load(f)
-        except: return {"users": {}}
-    return {"users": {}}
+    data = {"users": {}}
+    for user in users_col.find():
+        data["users"][user["user_id"]] = user
+    return data
 
-def save_data(data):
-    with open(DATA_FILE, "w", encoding='utf-8') as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
+def db_update_user(uid, name, guilde, pts, win):
+    win_inc = 1 if win else 0
+    loss_inc = 0 if win else 1
+    users_col.update_one(
+        {"user_id": str(uid)},
+        {
+            "$set": {"name": name, "guilde": guilde},
+            "$inc": {"pts_perco": float(pts), "wins": win_inc, "losses": loss_inc}
+        },
+        upsert=True
+    )
 
 def load_config():
     default = {"bareme": {"Prisme": {"4v4": 15, "4v3/2": 10, "4v1/0": 7, "perdu_long": 1},
                          "Perco_Atk": {"4v4": 3, "4v3/2": 2, "4v1/0": 1},
                          "Perco_Def": {"win": 2}, "bonus_mixte": 1, "bonus_long": 1}}
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, "r", encoding='utf-8') as f: return json.load(f)
-        except: return default
-    return default
+    cfg = config_col.find_one({"type": "main_config"})
+    return cfg["data"] if cfg else default
 
-def save_config(config):
-    with open(CONFIG_FILE, "w", encoding='utf-8') as f:
-        json.dump(config, f, indent=4, ensure_ascii=False)
+def save_config(config_data):
+    config_col.update_one(
+        {"type": "main_config"},
+        {"$set": {"data": config_data}},
+        upsert=True
+    )
 
 # --- ADMINISTRATION (MODAL & PANEL) ---
-
 class PtsInputModal(discord.ui.Modal, title="Modifier Points"):
     val = discord.ui.TextInput(label="Nouvelle valeur", placeholder="Ex: 5")
     def __init__(self, cat, key):
@@ -63,8 +73,8 @@ class PtsInputModal(discord.ui.Modal, title="Modifier Points"):
         try:
             v = float(self.val.value)
             cfg = load_config()
-            if self.cat in ["bonus_mixte", "bonus_long"]: cfg["bareme"][self.cat] = v
-            else: cfg["bareme"][self.cat][self.key] = v
+            if self.cat in ["bonus_mixte", "bonus_long"]: cfg[self.cat] = v
+            else: cfg[self.cat][self.key] = v
             save_config(cfg)
             await interaction.response.send_message(f"✅ Barème mis à jour : `{self.cat}` -> `{v} pts`", ephemeral=True)
         except: await interaction.response.send_message("❌ Erreur de nombre.", ephemeral=True)
@@ -100,7 +110,7 @@ class ResetConfirmView(discord.ui.View):
     def __init__(self): super().__init__(timeout=30)
     @discord.ui.button(label="CONFIRMER LE RESET", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction, button):
-        save_data({"users": {}})
+        users_col.delete_many({})
         await interaction.response.edit_message(content="✅ **Reset terminé !**", view=None)
 
 # --- FONCTIONS CLASSEMENT ---
@@ -170,10 +180,8 @@ class CombatWizard(discord.ui.View):
         curr = self.pending_members[0]; self.clear_items()
         sel = discord.ui.Select(placeholder=f"Guilde de {curr.display_name} ?", options=[discord.SelectOption(label=g) for g in ALLIANCE_GUILDES])
         async def guild_cb(i):
-            d = load_data(); uid = str(curr.id)
-            if uid not in d["users"]: d["users"][uid] = {"name": curr.display_name, "guilde": sel.values[0], "pts_perco": 0.0, "wins": 0, "losses": 0}
-            else: d["users"][uid]["guilde"] = sel.values[0]
-            save_data(d); self.pending_members.pop(0); await self.ask_next_guild_config(i)
+            db_update_user(curr.id, curr.display_name, sel.values[0], 0, True) # Init user in DB
+            self.pending_members.pop(0); await self.ask_next_guild_config(i)
         sel.callback = guild_cb; self.add_item(sel)
         await interaction.response.edit_message(content=f"⚙️ Guilde de **{curr.display_name}** ?", view=self)
 
@@ -228,13 +236,13 @@ class CombatWizard(discord.ui.View):
             msg = await self.bot.wait_for("message", check=lambda m: m.author == self.user and m.attachments, timeout=300)
             data = load_data(); summary = ""
             for m in self.participants:
-                uid = str(m.id); data["users"][uid]["pts_perco"] += pts
-                if win: data["users"][uid]["wins"] += 1
-                else: data["users"][uid]["losses"] += 1
-                summary += f"• {m.display_name} ({data['users'][uid]['guilde']})\n"
-            save_data(data)
-            if target_ch: await target_ch.send(f"✅ **{self.type_combat}** ({pts} pts)\n{summary}")
-            await msg.reply("✅ Enregistré !")
+                uid = str(m.id)
+                u_info = data["users"].get(uid, {"name": m.display_name, "guilde": "À Définir"})
+                db_update_user(uid, m.display_name, u_info["guilde"], pts, win)
+                summary += f"• {m.display_name} ({u_info['guilde']})\n"
+            
+            if target_ch: await target_ch.send(f"✅ **{self.type_combat}** ({pts} pts)\n{summary}", file=await msg.attachments[0].to_file())
+            await msg.reply(f"✅ Enregistré sur MongoDB ! (+{pts} pts)")
         except: pass
 
 # --- SETUP BOT ---
@@ -265,7 +273,7 @@ async def classement(interaction: discord.Interaction):
 @bot.tree.command(name="admin_panel", description="Gérer les points du barème")
 @app_commands.checks.has_permissions(administrator=True)
 async def admin(interaction: discord.Interaction):
-    await interaction.response.send_message("⚙️ **CONFIGURATION**", view=ConfigPanel(), ephemeral=True)
+    await interaction.response.send_message("⚙️ **CONFIGURATION (MongoDB)**", view=ConfigPanel(), ephemeral=True)
 
 @bot.tree.command(name="reset_classement", description="Remise à zéro complète")
 @app_commands.checks.has_permissions(administrator=True)
@@ -273,11 +281,11 @@ async def reset(interaction: discord.Interaction):
     await interaction.response.send_message("🚨 **Reset ?**", view=ResetConfirmView(), ephemeral=True)
 
 @app.route('/')
-def home(): return "Bot en ligne !"
+def home(): return "Bot MongoDB Atlas Online !"
 
 if __name__ == "__main__":
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=5000), daemon=True).start()
     if not TOKEN:
-        print("❌ Erreur : DISCORD_TOKEN non trouvé dans l'environnement !")
+        print("❌ Erreur : DISCORD_TOKEN non trouvé !")
     else:
         bot.run(TOKEN)
