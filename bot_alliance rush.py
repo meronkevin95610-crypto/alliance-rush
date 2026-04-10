@@ -114,11 +114,15 @@ class ConfigPanel(discord.ui.View):
         await interaction.response.send_message("Points Percos :", view=v, ephemeral=True)
 
 class ResetConfirmView(discord.ui.View):
-    def __init__(self): super().__init__(timeout=30)
+    def __init__(self, bot_instance): 
+        super().__init__(timeout=30)
+        self.bot = bot_instance
+
     @discord.ui.button(label="CONFIRMER LE RESET", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction, button):
         users_col.delete_many({})
         await interaction.response.edit_message(content="✅ **Reset terminé !**", view=None)
+        await self.bot.refresh_dashboard()
 
 # --- FONCTIONS CLASSEMENT ---
 def build_player_rank(data):
@@ -298,20 +302,23 @@ class CombatWizard(discord.ui.View):
                 summary += f"• {p['name']} ({u_info['guilde']})\n"
             
             await msg.reply(f"✅ Enregistré (+{pts} pts) !")
+            await self.bot.refresh_dashboard()
+            
         except Exception as e:
             print(f"Erreur finish: {e}")
 
 # --- SETUP BOT ---
 class RushBot(commands.Bot):
     def __init__(self): super().__init__(command_prefix="!", intents=discord.Intents.all())
-    async def setup_hook(self): self.update_dashboard.start(); await self.tree.sync()
+    async def setup_hook(self): await self.tree.sync()
 
-    @tasks.loop(minutes=5)
-    async def update_dashboard(self):
+    async def refresh_dashboard(self):
         ch = self.get_channel(DASHBOARD_CHANNEL_ID)
         if ch:
-            data = load_data(); await ch.purge(limit=5, check=lambda m: m.author == self.user)
-            await ch.send(embed=build_player_rank(data)); await ch.send(embed=build_guild_rank(data))
+            data = load_data()
+            await ch.purge(limit=5, check=lambda m: m.author == self.user)
+            await ch.send(embed=build_player_rank(data))
+            await ch.send(embed=build_guild_rank(data))
 
 bot = RushBot()
 
@@ -332,7 +339,7 @@ async def admin(interaction: discord.Interaction):
 @bot.tree.command(name="reset_classement")
 @app_commands.checks.has_permissions(administrator=True)
 async def reset(interaction: discord.Interaction):
-    await interaction.response.send_message("🚨 Reset ?", view=ResetConfirmView(), ephemeral=True)
+    await interaction.response.send_message("🚨 Reset ?", view=ResetConfirmView(bot), ephemeral=True)
 
 @app.route('/')
 def home(): return "Bot MongoDB Atlas Online !"
