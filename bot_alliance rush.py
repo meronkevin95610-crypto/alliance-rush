@@ -3,6 +3,7 @@ from discord.ext import commands, tasks
 from discord import app_commands
 import os
 import threading
+import asyncio  # Ajouté pour la gestion du Timeout
 from pymongo import MongoClient
 from flask import Flask
 from dotenv import load_dotenv
@@ -13,11 +14,16 @@ app = Flask('')
 MONGO_URL = os.getenv("MONGO_URL")
 TOKEN = os.getenv("DISCORD_TOKEN")
 
-# Connexion MongoDB
-client = MongoClient(MONGO_URL)
-db = client["alliance_rush"]
-users_col = db["users"]
-config_col = db["config"]
+# Connexion MongoDB avec sécurité
+try:
+    client = MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000)
+    client.server_info()  # Test de connexion
+    db = client["alliance_rush"]
+    users_col = db["users"]
+    config_col = db["config"]
+    print("✅ Connecté à MongoDB avec succès")
+except Exception as e:
+    print(f"❌ Erreur de connexion MongoDB : {e}")
 
 # IDs des Salons
 DASHBOARD_CHANNEL_ID = 1473418141160837140
@@ -144,7 +150,7 @@ def build_guild_rank(data):
     emb.description = table + "```"
     return emb
 
-# --- WIZARD DE COMBAT (AVEC MULTI-COMPTE & MANUEL) ---
+# --- WIZARD DE COMBAT ---
 class ManualPlayerModal(discord.ui.Modal, title="Ajout Joueur Manuel"):
     pseudo = discord.ui.TextInput(label="Nom du personnage", placeholder="Ex: Jean-Bond")
     def __init__(self, view):
@@ -195,11 +201,8 @@ class CombatWizard(discord.ui.View):
     async def check_guilds(self, interaction):
         if not self.participants:
             return await interaction.response.send_message("❌ Ajoutez au moins un joueur !", ephemeral=True)
-        
-        # On utilise defer ici aussi car load_data() contacte MongoDB
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True)
-            
         data = load_data()
         self.pending_members = [p for p in self.participants if p["id"] not in data["users"]]
         if self.pending_members: await self.ask_next_guild_config(interaction)
@@ -209,19 +212,13 @@ class CombatWizard(discord.ui.View):
         if not self.pending_members: await self.proceed_to_format(interaction); return
         curr = self.pending_members[0]; self.clear_items()
         sel = discord.ui.Select(placeholder=f"Guilde de {curr['name']} ?", options=[discord.SelectOption(label=g) for g in ALLIANCE_GUILDES])
-        
         async def guild_cb(i):
             db_update_user(curr["id"], curr["name"], sel.values[0], 0, True)
             self.pending_members.pop(0); await self.ask_next_guild_config(i)
-        
         sel.callback = guild_cb; self.add_item(sel)
-        
-        # Correction pour gérer le fait que l'interaction peut déjà être répondue (defer)
         msg = f"⚙️ Guilde de **{curr['name']}** ?"
-        if interaction.response.is_done():
-            await interaction.followup.send(content=msg, view=self, ephemeral=True)
-        else:
-            await interaction.response.edit_message(content=msg, view=self)
+        if interaction.response.is_done(): await interaction.followup.send(content=msg, view=self, ephemeral=True)
+        else: await interaction.response.edit_message(content=msg, view=self)
 
     async def proceed_to_format(self, interaction):
         if self.type_combat == "Perco_Def": self.format = "4v4"; await self.show_issue(interaction)
@@ -233,12 +230,9 @@ class CombatWizard(discord.ui.View):
                     async def cb(it): self.format = v; await self.show_issue(it)
                     return cb
                 btn.callback = mk_cb(f_v); self.add_item(btn)
-            
             msg = "**Étape 3 :** Format adverse ?"
-            if interaction.response.is_done():
-                await interaction.followup.send(content=msg, view=self, ephemeral=True)
-            else:
-                await interaction.response.edit_message(content=msg, view=self)
+            if interaction.response.is_done(): await interaction.followup.send(content=msg, view=self, ephemeral=True)
+            else: await interaction.response.edit_message(content=msg, view=self)
 
     async def show_issue(self, i):
         self.clear_items()
@@ -248,11 +242,8 @@ class CombatWizard(discord.ui.View):
                 async def cb(it): self.issue = r; await self.show_bonus(it)
                 return cb
             btn.callback = mk_cb(res); self.add_item(btn)
-        
-        if i.response.is_done():
-            await i.followup.send(content="**Étape 4 :** Résultat ?", view=self, ephemeral=True)
-        else:
-            await i.response.edit_message(content="**Étape 4 :** Résultat ?", view=self)
+        if i.response.is_done(): await i.followup.send(content="**Étape 4 :** Résultat ?", view=self, ephemeral=True)
+        else: await i.response.edit_message(content="**Étape 4 :** Résultat ?", view=self)
 
     async def show_bonus(self, i):
         self.clear_items()
@@ -262,11 +253,8 @@ class CombatWizard(discord.ui.View):
         bl.callback = lambda it: self.toggle_bonus(it, "long")
         vf = discord.ui.Button(label="VALIDER", style=discord.ButtonStyle.green, row=1)
         vf.callback = self.finish; self.add_item(bm); self.add_item(bl); self.add_item(vf)
-        
-        if i.response.is_done():
-            await i.followup.send(content="**Étape 5 :** Bonus ?", view=self, ephemeral=True)
-        else:
-            await i.response.edit_message(content="**Étape 5 :** Bonus ?", view=self)
+        if i.response.is_done(): await i.followup.send(content="**Étape 5 :** Bonus ?", view=self, ephemeral=True)
+        else: await i.response.edit_message(content="**Étape 5 :** Bonus ?", view=self)
 
     async def toggle_bonus(self, it, type_b):
         if type_b == "mixte": self.mixte = not self.mixte
@@ -283,11 +271,9 @@ class CombatWizard(discord.ui.View):
         if self.mixte: pts += float(cfg.get("bonus_mixte", 1))
         if self.long_combat and win: pts += float(cfg.get("bonus_long", 1))
 
-        msg_end = f"🏁 **{pts} pts/joueur.** Envoie le SCREEN !"
-        if interaction.response.is_done():
-            await interaction.followup.send(content=msg_end, view=None, ephemeral=True)
-        else:
-            await interaction.response.edit_message(content=msg_end, view=None)
+        msg_end = f"🏁 **{pts} pts/joueur.** Envoie le SCREEN dans ce salon !"
+        if interaction.response.is_done(): await interaction.followup.send(content=msg_end, view=None, ephemeral=True)
+        else: await interaction.response.edit_message(content=msg_end, view=None)
             
         try:
             msg = await self.bot.wait_for("message", check=lambda m: m.author == self.user and m.attachments, timeout=300)
@@ -300,48 +286,60 @@ class CombatWizard(discord.ui.View):
             
             target_ch = self.bot.get_channel(CH_DEFENSE if self.type_combat == "Perco_Def" else CH_ATTAQUE)
             if target_ch: await target_ch.send(f"✅ **{self.type_combat}** ({pts} pts)\n{summary}", file=await msg.attachments[0].to_file())
-            await msg.reply(f"✅ Enregistré (+{pts} pts) !")
-        except: pass
+            await msg.reply(f"✅ Combat enregistré pour {len(self.participants)} joueurs (+{pts} pts) !")
+        except asyncio.TimeoutError:
+            await self.user.send("⚠️ Temps écoulé (5min) pour envoyer le screen. Le combat n'a pas été enregistré.")
 
 # --- SETUP BOT ---
 class RushBot(commands.Bot):
     def __init__(self): super().__init__(command_prefix="!", intents=discord.Intents.all())
-    async def setup_hook(self): self.update_dashboard.start(); await self.tree.sync()
+    async def setup_hook(self): 
+        self.update_dashboard.start()
+        await self.tree.sync()
 
     @tasks.loop(minutes=5)
     async def update_dashboard(self):
         ch = self.get_channel(DASHBOARD_CHANNEL_ID)
         if ch:
-            data = load_data(); await ch.purge(limit=5, check=lambda m: m.author == self.user)
-            await ch.send(embed=build_player_rank(data)); await ch.send(embed=build_guild_rank(data))
+            try:
+                data = load_data()
+                await ch.purge(limit=10, check=lambda m: m.author == self.user)
+                await ch.send(embed=build_player_rank(data))
+                await ch.send(embed=build_guild_rank(data))
+            except Exception as e:
+                print(f"Erreur Dashboard : {e}")
 
 bot = RushBot()
 
-# --- COMMANDE AJOUTER_COMBAT CORRIGÉE ---
-@bot.tree.command(name="ajouter_combat")
+@bot.tree.command(name="ajouter_combat", description="Lancer le wizard de combat")
 async def add(interaction: discord.Interaction):
-    # On prévient Discord qu'on arrive (évite le timeout 404)
     await interaction.response.defer(ephemeral=True)
-    # On envoie le Wizard via followup
     await interaction.followup.send("🛡️ Wizard lancé", view=CombatWizard(interaction.user, bot))
 
-@bot.tree.command(name="classement")
+@bot.tree.command(name="classement", description="Afficher le classement actuel")
 async def classement(interaction: discord.Interaction):
-    data = load_data(); await interaction.response.send_message(embeds=[build_player_rank(data), build_guild_rank(data)])
+    data = load_data()
+    await interaction.response.send_message(embeds=[build_player_rank(data), build_guild_rank(data)])
 
-@bot.tree.command(name="admin_panel")
+@bot.tree.command(name="admin_panel", description="Accès administrateur au barème")
 @app_commands.checks.has_permissions(administrator=True)
 async def admin(interaction: discord.Interaction):
-    await interaction.response.send_message("⚙️ CONFIGURATION", view=ConfigPanel(), ephemeral=True)
+    await interaction.response.send_message("⚙️ CONFIGURATION DU BARÈME", view=ConfigPanel(), ephemeral=True)
 
-@bot.tree.command(name="reset_classement")
+@bot.tree.command(name="reset_classement", description="Réinitialiser toutes les données")
 @app_commands.checks.has_permissions(administrator=True)
 async def reset(interaction: discord.Interaction):
-    await interaction.response.send_message("🚨 Reset ?", view=ResetConfirmView(), ephemeral=True)
+    await interaction.response.send_message("🚨 Êtes-vous sûr de vouloir tout supprimer ?", view=ResetConfirmView(), ephemeral=True)
 
+# --- FLASK SERVER (POUR RENDER) ---
 @app.route('/')
-def home(): return "Bot MongoDB Atlas Online !"
+def home(): 
+    return "Bot Online - Status: 200 OK"
 
 if __name__ == "__main__":
-    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=5000), daemon=True).start()
+    # Récupération du port dynamique de Render
+    port = int(os.environ.get("PORT", 5000))
+    # Lancement de Flask dans un thread séparé
+    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=port), daemon=True).start()
+    # Lancement du Bot Discord
     bot.run(TOKEN)
