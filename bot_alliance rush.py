@@ -114,7 +114,7 @@ class ResetConfirmView(discord.ui.View):
         await interaction.response.edit_message(content="✅ **Reset terminé !**", view=None)
 
 # --- FONCTIONS CLASSEMENT ---
-def build_player_rank(guild, data):
+def build_player_rank(data):
     emb = discord.Embed(title="🏆 CLASSEMENT INDIVIDUEL", color=0xedb21c)
     scores = data.get("users", {})
     if not scores:
@@ -144,10 +144,26 @@ def build_guild_rank(data):
     emb.description = table + "```"
     return emb
 
-# --- WIZARD DE COMBAT ---
+# --- WIZARD DE COMBAT (AVEC MULTI-COMPTE & MANUEL) ---
+class ManualPlayerModal(discord.ui.Modal, title="Ajout Joueur Manuel"):
+    pseudo = discord.ui.TextInput(label="Nom du personnage", placeholder="Ex: Jean-Bond")
+    def __init__(self, view):
+        super().__init__()
+        self.parent_view = view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        pseudo_val = self.pseudo.value.strip()
+        fake_id = f"manual_{pseudo_val.lower()}"
+        self.parent_view.participants.append({"id": fake_id, "name": pseudo_val})
+        await interaction.response.edit_message(content=f"✅ Joueur ajouté : **{pseudo_val}**\nTotal participants : {len(self.parent_view.participants)}", view=self.parent_view)
+
 class MemberSelect(discord.ui.UserSelect):
-    def __init__(self): super().__init__(placeholder="Participants (max 4)", min_values=1, max_values=4)
-    async def callback(self, interaction): await self.view.check_guilds(interaction, self.values)
+    def __init__(self):
+        super().__init__(placeholder="Sélectionner des membres Discord", min_values=1, max_values=4)
+    async def callback(self, interaction: discord.Interaction):
+        for user in self.values:
+            self.view.participants.append({"id": str(user.id), "name": user.display_name})
+        await interaction.response.edit_message(content=f"✅ Membres Discord ajoutés.\nTotal participants : {len(self.view.participants)}", view=self.view)
 
 class CombatWizard(discord.ui.View):
     def __init__(self, user, bot_instance):
@@ -158,7 +174,7 @@ class CombatWizard(discord.ui.View):
         self.mixte = self.long_combat = False
         self.pending_members = []
         
-        for l, v in [("💎 Prisme", "Prisme"), ("⚔️ Perco Atk", "Perco_Atk"), ("🛡️ Perco Def", "Perco_Def")]:
+        for l, v in [("Prisme", "Prisme"), ("Perco Atk", "Perco_Atk"), ("Perco Def", "Perco_Def")]:
             btn = discord.ui.Button(label=l, style=discord.ButtonStyle.primary)
             def mk_cb(val):
                 async def cb(i): self.type_combat = val; await self.ask_members(i)
@@ -166,24 +182,34 @@ class CombatWizard(discord.ui.View):
             btn.callback = mk_cb(v); self.add_item(btn)
 
     async def ask_members(self, interaction):
-        self.clear_items(); self.add_item(MemberSelect())
-        await interaction.response.edit_message(content="**Étape 2 :** Qui a combattu ?", view=self)
+        self.clear_items()
+        self.add_item(MemberSelect())
+        btn_manual = discord.ui.Button(label="👤 Ajouter Manuel", style=discord.ButtonStyle.secondary)
+        btn_manual.callback = lambda i: i.response.send_modal(ManualPlayerModal(self))
+        self.add_item(btn_manual)
+        btn_next = discord.ui.Button(label="➡️ VALIDER LA TEAM", style=discord.ButtonStyle.green)
+        btn_next.callback = self.check_guilds
+        self.add_item(btn_next)
+        await interaction.response.edit_message(content="**Étape 2 :** Ajoutez les joueurs (Discord ou Manuel).", view=self)
 
-    async def check_guilds(self, interaction, members):
-        self.participants = members; data = load_data()
-        self.pending_members = [m for m in members if str(m.id) not in data["users"] or data["users"][str(m.id)]["guilde"] == "À Définir"]
+    async def check_guilds(self, interaction):
+        if not self.participants:
+            return await interaction.response.send_message("❌ Ajoutez au moins un joueur !", ephemeral=True)
+        data = load_data()
+        self.pending_members = [p for p in self.participants if p["id"] not in data["users"]]
         if self.pending_members: await self.ask_next_guild_config(interaction)
         else: await self.proceed_to_format(interaction)
 
     async def ask_next_guild_config(self, interaction):
         if not self.pending_members: await self.proceed_to_format(interaction); return
         curr = self.pending_members[0]; self.clear_items()
-        sel = discord.ui.Select(placeholder=f"Guilde de {curr.display_name} ?", options=[discord.SelectOption(label=g) for g in ALLIANCE_GUILDES])
+        sel = discord.ui.Select(placeholder=f"Guilde de {curr['name']} ?", options=[discord.SelectOption(label=g) for g in ALLIANCE_GUILDES])
         async def guild_cb(i):
-            db_update_user(curr.id, curr.display_name, sel.values[0], 0, True) # Init user in DB
+            db_update_user(curr["id"], curr["name"], sel.values[0], 0, True)
             self.pending_members.pop(0); await self.ask_next_guild_config(i)
         sel.callback = guild_cb; self.add_item(sel)
-        await interaction.response.edit_message(content=f"⚙️ Guilde de **{curr.display_name}** ?", view=self)
+        if interaction.response.is_done(): await interaction.edit_original_response(content=f"⚙️ Guilde de **{curr['name']}** ?", view=self)
+        else: await interaction.response.edit_message(content=f"⚙️ Guilde de **{curr['name']}** ?", view=self)
 
     async def proceed_to_format(self, interaction):
         if self.type_combat == "Perco_Def": self.format = "4v4"; await self.show_issue(interaction)
@@ -195,7 +221,7 @@ class CombatWizard(discord.ui.View):
                     async def cb(it): self.format = v; await self.show_issue(it)
                     return cb
                 btn.callback = mk_cb(f_v); self.add_item(btn)
-            await interaction.response.edit_message(content="**Étape 3 :** Format adverse ?", view=self)
+            await (interaction.edit_original_response(content="**Étape 3 :** Format adverse ?", view=self) if interaction.response.is_done() else interaction.response.edit_message(content="**Étape 3 :** Format adverse ?", view=self))
 
     async def show_issue(self, i):
         self.clear_items()
@@ -210,15 +236,17 @@ class CombatWizard(discord.ui.View):
     async def show_bonus(self, i):
         self.clear_items()
         bm = discord.ui.Button(label="Team Mixte ✅" if self.mixte else "Team Mixte ?", style=discord.ButtonStyle.blurple)
-        async def cbm(it): self.mixte = not self.mixte; await self.show_bonus(it)
-        bm.callback = cbm
+        bm.callback = lambda it: self.toggle_bonus(it, "mixte")
         bl = discord.ui.Button(label="Combat Long ✅" if self.long_combat else "Combat Long ?", style=discord.ButtonStyle.blurple)
-        async def cbl(it): self.long_combat = not self.long_combat; await self.show_bonus(it)
-        bl.callback = cbl
+        bl.callback = lambda it: self.toggle_bonus(it, "long")
         vf = discord.ui.Button(label="VALIDER", style=discord.ButtonStyle.green, row=1)
-        vf.callback = self.finish
-        self.add_item(bm); self.add_item(bl); self.add_item(vf)
+        vf.callback = self.finish; self.add_item(bm); self.add_item(bl); self.add_item(vf)
         await i.response.edit_message(content="**Étape 5 :** Bonus ?", view=self)
+
+    async def toggle_bonus(self, it, type_b):
+        if type_b == "mixte": self.mixte = not self.mixte
+        else: self.long_combat = not self.long_combat
+        await self.show_bonus(it)
 
     async def finish(self, interaction):
         cfg = load_config()["bareme"]; pts = 0.0; win = (self.issue == "Victoire")
@@ -229,20 +257,20 @@ class CombatWizard(discord.ui.View):
         elif self.type_combat == "Perco_Def" and win: pts = float(cfg["Perco_Def"].get("win", 2))
         if self.mixte: pts += float(cfg.get("bonus_mixte", 1))
         if self.long_combat and win: pts += float(cfg.get("bonus_long", 1))
-        
-        target_ch = self.bot.get_channel(CH_DEFENSE if self.type_combat == "Perco_Def" else CH_ATTAQUE)
+
         await interaction.response.edit_message(content=f"🏁 **{pts} pts/joueur.** Envoie le SCREEN !", view=None)
         try:
             msg = await self.bot.wait_for("message", check=lambda m: m.author == self.user and m.attachments, timeout=300)
             data = load_data(); summary = ""
-            for m in self.participants:
-                uid = str(m.id)
-                u_info = data["users"].get(uid, {"name": m.display_name, "guilde": "À Définir"})
-                db_update_user(uid, m.display_name, u_info["guilde"], pts, win)
-                summary += f"• {m.display_name} ({u_info['guilde']})\n"
+            for p in self.participants:
+                uid = p["id"]
+                u_info = data["users"].get(uid, {"name": p["name"], "guilde": "À Définir"})
+                db_update_user(uid, p["name"], u_info["guilde"], pts, win)
+                summary += f"• {p['name']} ({u_info['guilde']})\n"
             
+            target_ch = self.bot.get_channel(CH_DEFENSE if self.type_combat == "Perco_Def" else CH_ATTAQUE)
             if target_ch: await target_ch.send(f"✅ **{self.type_combat}** ({pts} pts)\n{summary}", file=await msg.attachments[0].to_file())
-            await msg.reply(f"✅ Enregistré sur MongoDB ! (+{pts} pts)")
+            await msg.reply(f"✅ Enregistré (+{pts} pts) !")
         except: pass
 
 # --- SETUP BOT ---
@@ -255,37 +283,31 @@ class RushBot(commands.Bot):
         ch = self.get_channel(DASHBOARD_CHANNEL_ID)
         if ch:
             data = load_data(); await ch.purge(limit=5, check=lambda m: m.author == self.user)
-            await ch.send(embed=build_player_rank(ch.guild, data))
-            await ch.send(embed=build_guild_rank(data))
+            await ch.send(embed=build_player_rank(data)); await ch.send(embed=build_guild_rank(data))
 
 bot = RushBot()
 
-@bot.tree.command(name="ajouter_combat", description="Lancer le wizard de combat")
+@bot.tree.command(name="ajouter_combat")
 async def add(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    await interaction.followup.send("**Étape 1 :** Quel type de combat ?", view=CombatWizard(interaction.user, bot))
+    await interaction.response.send_message("🛡️ Wizard lancé", view=CombatWizard(interaction.user, bot), ephemeral=True)
 
-@bot.tree.command(name="classement", description="Voir le classement actuel")
+@bot.tree.command(name="classement")
 async def classement(interaction: discord.Interaction):
-    data = load_data()
-    await interaction.response.send_message(embeds=[build_player_rank(interaction.guild, data), build_guild_rank(data)])
+    data = load_data(); await interaction.response.send_message(embeds=[build_player_rank(data), build_guild_rank(data)])
 
-@bot.tree.command(name="admin_panel", description="Gérer les points du barème")
+@bot.tree.command(name="admin_panel")
 @app_commands.checks.has_permissions(administrator=True)
 async def admin(interaction: discord.Interaction):
-    await interaction.response.send_message("⚙️ **CONFIGURATION (MongoDB)**", view=ConfigPanel(), ephemeral=True)
+    await interaction.response.send_message("⚙️ CONFIGURATION", view=ConfigPanel(), ephemeral=True)
 
-@bot.tree.command(name="reset_classement", description="Remise à zéro complète")
+@bot.tree.command(name="reset_classement")
 @app_commands.checks.has_permissions(administrator=True)
 async def reset(interaction: discord.Interaction):
-    await interaction.response.send_message("🚨 **Reset ?**", view=ResetConfirmView(), ephemeral=True)
+    await interaction.response.send_message("🚨 Reset ?", view=ResetConfirmView(), ephemeral=True)
 
 @app.route('/')
 def home(): return "Bot MongoDB Atlas Online !"
 
 if __name__ == "__main__":
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=5000), daemon=True).start()
-    if not TOKEN:
-        print("❌ Erreur : DISCORD_TOKEN non trouvé !")
-    else:
-        bot.run(TOKEN)
+    bot.run(TOKEN)
