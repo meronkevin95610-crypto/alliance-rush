@@ -8,12 +8,12 @@ from flask import Flask
 from dotenv import load_dotenv
 
 # --- CONFIGURATION & DATA ---
-load_dotenv() # Charge les variables du fichier .env ou de l'environnement Render
+load_dotenv() 
 app = Flask('')
 DATA_FILE = "stats_rush_event.json"
 CONFIG_FILE = "config_rush.json"
 
-# Récupération du Token depuis l'environnement
+# Récupération du Token depuis l'environnement Render
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 # IDs des Salons
@@ -55,7 +55,6 @@ def save_config(config):
 
 class PtsInputModal(discord.ui.Modal, title="Modifier Points"):
     val = discord.ui.TextInput(label="Nouvelle valeur", placeholder="Ex: 5")
-    
     def __init__(self, cat, key):
         super().__init__()
         self.cat, self.key = cat, key
@@ -64,18 +63,14 @@ class PtsInputModal(discord.ui.Modal, title="Modifier Points"):
         try:
             v = float(self.val.value)
             cfg = load_config()
-            if self.cat in ["bonus_mixte", "bonus_long"]: 
-                cfg["bareme"][self.cat] = v
-            else: 
-                cfg["bareme"][self.cat][self.key] = v
+            if self.cat in ["bonus_mixte", "bonus_long"]: cfg["bareme"][self.cat] = v
+            else: cfg["bareme"][self.cat][self.key] = v
             save_config(cfg)
             await interaction.response.send_message(f"✅ Barème mis à jour : `{self.cat}` -> `{v} pts`", ephemeral=True)
-        except ValueError: 
-            await interaction.response.send_message("❌ Erreur : Entre un nombre valide.", ephemeral=True)
+        except: await interaction.response.send_message("❌ Erreur de nombre.", ephemeral=True)
 
 class ConfigPanel(discord.ui.View):
     def __init__(self): super().__init__(timeout=None)
-
     @discord.ui.button(label="💎 Prismes", style=discord.ButtonStyle.primary)
     async def b_prisme(self, interaction, button):
         v = discord.ui.View()
@@ -85,7 +80,7 @@ class ConfigPanel(discord.ui.View):
                 async def cb(i): await i.response.send_modal(PtsInputModal("Prisme", key))
                 return cb
             btn.callback = mk_cb(k); v.add_item(btn)
-        await interaction.response.send_message("Modifier les points Prismes :", view=v, ephemeral=True)
+        await interaction.response.send_message("Points Prismes :", view=v, ephemeral=True)
 
     @discord.ui.button(label="⚔️ Percos", style=discord.ButtonStyle.secondary)
     async def b_perco(self, interaction, button):
@@ -99,31 +94,21 @@ class ConfigPanel(discord.ui.View):
         bd = discord.ui.Button(label="Def Win", style=discord.ButtonStyle.success)
         bd.callback = lambda i: i.response.send_modal(PtsInputModal("Perco_Def", "win"))
         v.add_item(bd)
-        await interaction.response.send_message("Modifier les points Percos :", view=v, ephemeral=True)
-
-    @discord.ui.button(label="⭐ Bonus", style=discord.ButtonStyle.success)
-    async def b_bonus(self, interaction, button):
-        v = discord.ui.View()
-        bm = discord.ui.Button(label="Bonus Mixte")
-        bm.callback = lambda i: i.response.send_modal(PtsInputModal("bonus_mixte", None))
-        bl = discord.ui.Button(label="Bonus Combat Long")
-        bl.callback = lambda i: i.response.send_modal(PtsInputModal("bonus_long", None))
-        v.add_item(bm); v.add_item(bl)
-        await interaction.response.send_message("Modifier les bonus :", view=v, ephemeral=True)
+        await interaction.response.send_message("Points Percos :", view=v, ephemeral=True)
 
 class ResetConfirmView(discord.ui.View):
     def __init__(self): super().__init__(timeout=30)
     @discord.ui.button(label="CONFIRMER LE RESET", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction, button):
         save_data({"users": {}})
-        await interaction.response.edit_message(content="✅ **Classement réinitialisé !**", view=None)
+        await interaction.response.edit_message(content="✅ **Reset terminé !**", view=None)
 
 # --- FONCTIONS CLASSEMENT ---
 def build_player_rank(guild, data):
     emb = discord.Embed(title="🏆 CLASSEMENT INDIVIDUEL", color=0xedb21c)
     scores = data.get("users", {})
     if not scores:
-        emb.description = "Aucune donnée enregistrée."
+        emb.description = "Aucune donnée."
         return emb
     sorted_u = sorted(scores.items(), key=lambda x: x[1].get('pts_perco', 0), reverse=True)[:15]
     table = "```\n# Joueur        | Pts  | W | L | %\n" + "-"*37 + "\n"
@@ -151,10 +136,8 @@ def build_guild_rank(data):
 
 # --- WIZARD DE COMBAT ---
 class MemberSelect(discord.ui.UserSelect):
-    def __init__(self):
-        super().__init__(placeholder="Qui a participé ? (max 4)", min_values=1, max_values=4)
-    async def callback(self, interaction):
-        await self.view.check_guilds(interaction, self.values)
+    def __init__(self): super().__init__(placeholder="Participants (max 4)", min_values=1, max_values=4)
+    async def callback(self, interaction): await self.view.check_guilds(interaction, self.values)
 
 class CombatWizard(discord.ui.View):
     def __init__(self, user, bot_instance):
@@ -174,7 +157,7 @@ class CombatWizard(discord.ui.View):
 
     async def ask_members(self, interaction):
         self.clear_items(); self.add_item(MemberSelect())
-        await interaction.response.edit_message(content="**Étape 2 :** Sélectionne les membres.", view=self)
+        await interaction.response.edit_message(content="**Étape 2 :** Qui a combattu ?", view=self)
 
     async def check_guilds(self, interaction, members):
         self.participants = members; data = load_data()
@@ -236,7 +219,6 @@ class CombatWizard(discord.ui.View):
             elif self.format == "4v4" and self.long_combat: pts = float(cfg["Prisme"].get("perdu_long", 1))
         elif self.type_combat == "Perco_Atk" and win: pts = float(cfg["Perco_Atk"].get(self.format, 1))
         elif self.type_combat == "Perco_Def" and win: pts = float(cfg["Perco_Def"].get("win", 2))
-        
         if self.mixte: pts += float(cfg.get("bonus_mixte", 1))
         if self.long_combat and win: pts += float(cfg.get("bonus_long", 1))
         
@@ -274,6 +256,11 @@ bot = RushBot()
 async def add(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     await interaction.followup.send("**Étape 1 :** Quel type de combat ?", view=CombatWizard(interaction.user, bot))
+
+@bot.tree.command(name="classement", description="Voir le classement actuel")
+async def classement(interaction: discord.Interaction):
+    data = load_data()
+    await interaction.response.send_message(embeds=[build_player_rank(interaction.guild, data), build_guild_rank(data)])
 
 @bot.tree.command(name="admin_panel", description="Gérer les points du barème")
 @app_commands.checks.has_permissions(administrator=True)
