@@ -24,6 +24,7 @@ DASHBOARD_CHANNEL_ID = 1473418141160837140
 CH_ATTAQUE = 1470492327679230156
 CH_DEFENSE = 1470492446885544059
 
+# LISTE DES GUILDES MISE À JOUR
 ALLIANCE_GUILDES = [
     "OLYMPE", "EXODE", "LACOSTE TN", "THE UNKNOWNS",
     "OLD SCHOOL", "NONOOB", "STELLAR", "DEVIANCE"
@@ -45,7 +46,6 @@ def db_update_user(uid, name, guilde, pts, win, screen_url=None):
         "$inc": {"pts_perco": float(pts), "wins": win_inc, "losses": loss_inc}
     }
     
-    # Ajout du lien du screen s'il existe
     if screen_url:
         update_data["$set"]["last_screen"] = screen_url
 
@@ -69,7 +69,7 @@ def save_config(config_data):
         upsert=True
     )
 
-# --- ADMINISTRATION (MODAL & PANEL) ---
+# --- ADMINISTRATION ---
 class PtsInputModal(discord.ui.Modal, title="Modifier Points"):
     val = discord.ui.TextInput(label="Nouvelle valeur", placeholder="Ex: 5")
     def __init__(self, cat, key):
@@ -129,7 +129,6 @@ def build_player_rank(data):
         return emb
     sorted_u = sorted(scores.items(), key=lambda x: x[1].get('pts_perco', 0), reverse=True)[:15]
     
-    # On utilise des puces pour que les liens Markdown fonctionnent
     table = "**Joueur | Pts | W | L | Preuve**\n" + "-"*35 + "\n"
     for uid, d in sorted_u:
         name = d.get("name", "Inconnu")[:12].ljust(13)
@@ -285,11 +284,9 @@ class CombatWizard(discord.ui.View):
             msg = await self.bot.wait_for("message", check=lambda m: m.author == self.user and m.attachments, timeout=300)
             data = load_data(); summary = ""
             
-            # On envoie le screen d'abord pour avoir l'URL
             target_ch = self.bot.get_channel(CH_DEFENSE if self.type_combat == "Perco_Def" else CH_ATTAQUE)
             screen_url = None
             if target_ch:
-                # Création d'un résumé rapide pour le salon log
                 log_summary = "\n".join([f"• {p['name']}" for p in self.participants])
                 sent_msg = await target_ch.send(f"✅ **{self.type_combat}** ({pts} pts)\n{log_summary}", file=await msg.attachments[0].to_file())
                 screen_url = sent_msg.attachments[0].url
