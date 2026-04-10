@@ -1,4 +1,4 @@
-﻿import discord
+import discord
 from discord.ext import commands, tasks
 from discord import app_commands
 import json
@@ -8,10 +8,13 @@ from flask import Flask
 from dotenv import load_dotenv
 
 # --- CONFIGURATION & DATA ---
-load_dotenv()
+load_dotenv() # Charge les variables du fichier .env ou de l'environnement Render
 app = Flask('')
 DATA_FILE = "stats_rush_event.json"
 CONFIG_FILE = "config_rush.json"
+
+# Récupération du Token depuis l'environnement
+TOKEN = os.getenv("DISCORD_TOKEN")
 
 # IDs des Salons
 DASHBOARD_CHANNEL_ID = 1473418141160837140
@@ -68,11 +71,10 @@ class PtsInputModal(discord.ui.Modal, title="Modifier Points"):
             save_config(cfg)
             await interaction.response.send_message(f"✅ Barème mis à jour : `{self.cat}` -> `{v} pts`", ephemeral=True)
         except ValueError: 
-            await interaction.response.send_message("❌ Erreur : Entre un nombre valide (ex: 5 ou 2.5).", ephemeral=True)
+            await interaction.response.send_message("❌ Erreur : Entre un nombre valide.", ephemeral=True)
 
 class ConfigPanel(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
+    def __init__(self): super().__init__(timeout=None)
 
     @discord.ui.button(label="💎 Prismes", style=discord.ButtonStyle.primary)
     async def b_prisme(self, interaction, button):
@@ -88,14 +90,12 @@ class ConfigPanel(discord.ui.View):
     @discord.ui.button(label="⚔️ Percos", style=discord.ButtonStyle.secondary)
     async def b_perco(self, interaction, button):
         v = discord.ui.View()
-        # Atk
         for k in ["4v4", "4v3/2", "4v1/0"]:
             btn = discord.ui.Button(label=f"Atk {k}")
             def mk_cb(key):
                 async def cb(i): await i.response.send_modal(PtsInputModal("Perco_Atk", key))
                 return cb
             btn.callback = mk_cb(k); v.add_item(btn)
-        # Def
         bd = discord.ui.Button(label="Def Win", style=discord.ButtonStyle.success)
         bd.callback = lambda i: i.response.send_modal(PtsInputModal("Perco_Def", "win"))
         v.add_item(bd)
@@ -104,19 +104,19 @@ class ConfigPanel(discord.ui.View):
     @discord.ui.button(label="⭐ Bonus", style=discord.ButtonStyle.success)
     async def b_bonus(self, interaction, button):
         v = discord.ui.View()
-        b_mixte = discord.ui.Button(label="Bonus Mixte")
-        b_mixte.callback = lambda i: i.response.send_modal(PtsInputModal("bonus_mixte", None))
-        b_long = discord.ui.Button(label="Bonus Combat Long")
-        b_long.callback = lambda i: i.response.send_modal(PtsInputModal("bonus_long", None))
-        v.add_item(b_mixte); v.add_item(b_long)
+        bm = discord.ui.Button(label="Bonus Mixte")
+        bm.callback = lambda i: i.response.send_modal(PtsInputModal("bonus_mixte", None))
+        bl = discord.ui.Button(label="Bonus Combat Long")
+        bl.callback = lambda i: i.response.send_modal(PtsInputModal("bonus_long", None))
+        v.add_item(bm); v.add_item(bl)
         await interaction.response.send_message("Modifier les bonus :", view=v, ephemeral=True)
 
 class ResetConfirmView(discord.ui.View):
     def __init__(self): super().__init__(timeout=30)
-    @discord.ui.button(label="CONFIRMER LA RÉINITIALISATION", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="CONFIRMER LE RESET", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction, button):
         save_data({"users": {}})
-        await interaction.response.edit_message(content="✅ **Classement remis à zéro !**", view=None)
+        await interaction.response.edit_message(content="✅ **Classement réinitialisé !**", view=None)
 
 # --- FONCTIONS CLASSEMENT ---
 def build_player_rank(guild, data):
@@ -278,14 +278,19 @@ async def add(interaction: discord.Interaction):
 @bot.tree.command(name="admin_panel", description="Gérer les points du barème")
 @app_commands.checks.has_permissions(administrator=True)
 async def admin(interaction: discord.Interaction):
-    await interaction.response.send_message("⚙️ **PANNEAU DE CONFIGURATION**\nChoisis la catégorie à modifier :", view=ConfigPanel(), ephemeral=True)
+    await interaction.response.send_message("⚙️ **CONFIGURATION**", view=ConfigPanel(), ephemeral=True)
 
 @bot.tree.command(name="reset_classement", description="Remise à zéro complète")
 @app_commands.checks.has_permissions(administrator=True)
 async def reset(interaction: discord.Interaction):
-    await interaction.response.send_message("🚨 **ATTENTION** : Confirmer le reset ?", view=ResetConfirmView(), ephemeral=True)
+    await interaction.response.send_message("🚨 **Reset ?**", view=ResetConfirmView(), ephemeral=True)
+
+@app.route('/')
+def home(): return "Bot en ligne !"
 
 if __name__ == "__main__":
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=5000), daemon=True).start()
-    TOKEN = "MTQ4OTM1MTgyNDY1Mjg5NDQwOA.GYTnks.bXc_SRaXKZQxDEquCSEjZ1WuMr679m56kb6Apo"
-    bot.run(TOKEN)
+    if not TOKEN:
+        print("❌ Erreur : DISCORD_TOKEN non trouvé dans l'environnement !")
+    else:
+        bot.run(TOKEN)
