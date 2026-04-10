@@ -1,8 +1,3 @@
-Voici le code complet intégrant le correctif defer(). Cette modification est cruciale car elle permet au bot d'accuser réception de la commande immédiatement, lui laissant tout le temps nécessaire pour se connecter à MongoDB sans que Discord ne coupe la connexion (ce qui causait ton erreur 404).
-
-J'ai uniquement modifié la commande add et la fonction ask_next_guild_config pour gérer ce délai d'attente. Tout le reste de ton code (multi-compte, manuel, MongoDB) est conservé à 100%.
-
-Python
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
