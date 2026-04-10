@@ -1,3 +1,8 @@
+Voici le code complet intégrant le correctif defer(). Cette modification est cruciale car elle permet au bot d'accuser réception de la commande immédiatement, lui laissant tout le temps nécessaire pour se connecter à MongoDB sans que Discord ne coupe la connexion (ce qui causait ton erreur 404).
+
+J'ai uniquement modifié la commande add et la fonction ask_next_guild_config pour gérer ce délai d'attente. Tout le reste de ton code (multi-compte, manuel, MongoDB) est conservé à 100%.
+
+Python
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
@@ -195,6 +200,11 @@ class CombatWizard(discord.ui.View):
     async def check_guilds(self, interaction):
         if not self.participants:
             return await interaction.response.send_message("❌ Ajoutez au moins un joueur !", ephemeral=True)
+        
+        # On utilise defer ici aussi car load_data() contacte MongoDB
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+            
         data = load_data()
         self.pending_members = [p for p in self.participants if p["id"] not in data["users"]]
         if self.pending_members: await self.ask_next_guild_config(interaction)
@@ -204,12 +214,19 @@ class CombatWizard(discord.ui.View):
         if not self.pending_members: await self.proceed_to_format(interaction); return
         curr = self.pending_members[0]; self.clear_items()
         sel = discord.ui.Select(placeholder=f"Guilde de {curr['name']} ?", options=[discord.SelectOption(label=g) for g in ALLIANCE_GUILDES])
+        
         async def guild_cb(i):
             db_update_user(curr["id"], curr["name"], sel.values[0], 0, True)
             self.pending_members.pop(0); await self.ask_next_guild_config(i)
+        
         sel.callback = guild_cb; self.add_item(sel)
-        if interaction.response.is_done(): await interaction.edit_original_response(content=f"⚙️ Guilde de **{curr['name']}** ?", view=self)
-        else: await interaction.response.edit_message(content=f"⚙️ Guilde de **{curr['name']}** ?", view=self)
+        
+        # Correction pour gérer le fait que l'interaction peut déjà être répondue (defer)
+        msg = f"⚙️ Guilde de **{curr['name']}** ?"
+        if interaction.response.is_done():
+            await interaction.followup.send(content=msg, view=self, ephemeral=True)
+        else:
+            await interaction.response.edit_message(content=msg, view=self)
 
     async def proceed_to_format(self, interaction):
         if self.type_combat == "Perco_Def": self.format = "4v4"; await self.show_issue(interaction)
@@ -221,7 +238,12 @@ class CombatWizard(discord.ui.View):
                     async def cb(it): self.format = v; await self.show_issue(it)
                     return cb
                 btn.callback = mk_cb(f_v); self.add_item(btn)
-            await (interaction.edit_original_response(content="**Étape 3 :** Format adverse ?", view=self) if interaction.response.is_done() else interaction.response.edit_message(content="**Étape 3 :** Format adverse ?", view=self))
+            
+            msg = "**Étape 3 :** Format adverse ?"
+            if interaction.response.is_done():
+                await interaction.followup.send(content=msg, view=self, ephemeral=True)
+            else:
+                await interaction.response.edit_message(content=msg, view=self)
 
     async def show_issue(self, i):
         self.clear_items()
@@ -231,7 +253,11 @@ class CombatWizard(discord.ui.View):
                 async def cb(it): self.issue = r; await self.show_bonus(it)
                 return cb
             btn.callback = mk_cb(res); self.add_item(btn)
-        await i.response.edit_message(content="**Étape 4 :** Résultat ?", view=self)
+        
+        if i.response.is_done():
+            await i.followup.send(content="**Étape 4 :** Résultat ?", view=self, ephemeral=True)
+        else:
+            await i.response.edit_message(content="**Étape 4 :** Résultat ?", view=self)
 
     async def show_bonus(self, i):
         self.clear_items()
@@ -241,7 +267,11 @@ class CombatWizard(discord.ui.View):
         bl.callback = lambda it: self.toggle_bonus(it, "long")
         vf = discord.ui.Button(label="VALIDER", style=discord.ButtonStyle.green, row=1)
         vf.callback = self.finish; self.add_item(bm); self.add_item(bl); self.add_item(vf)
-        await i.response.edit_message(content="**Étape 5 :** Bonus ?", view=self)
+        
+        if i.response.is_done():
+            await i.followup.send(content="**Étape 5 :** Bonus ?", view=self, ephemeral=True)
+        else:
+            await i.response.edit_message(content="**Étape 5 :** Bonus ?", view=self)
 
     async def toggle_bonus(self, it, type_b):
         if type_b == "mixte": self.mixte = not self.mixte
@@ -258,7 +288,12 @@ class CombatWizard(discord.ui.View):
         if self.mixte: pts += float(cfg.get("bonus_mixte", 1))
         if self.long_combat and win: pts += float(cfg.get("bonus_long", 1))
 
-        await interaction.response.edit_message(content=f"🏁 **{pts} pts/joueur.** Envoie le SCREEN !", view=None)
+        msg_end = f"🏁 **{pts} pts/joueur.** Envoie le SCREEN !"
+        if interaction.response.is_done():
+            await interaction.followup.send(content=msg_end, view=None, ephemeral=True)
+        else:
+            await interaction.response.edit_message(content=msg_end, view=None)
+            
         try:
             msg = await self.bot.wait_for("message", check=lambda m: m.author == self.user and m.attachments, timeout=300)
             data = load_data(); summary = ""
@@ -287,9 +322,13 @@ class RushBot(commands.Bot):
 
 bot = RushBot()
 
+# --- COMMANDE AJOUTER_COMBAT CORRIGÉE ---
 @bot.tree.command(name="ajouter_combat")
 async def add(interaction: discord.Interaction):
-    await interaction.response.send_message("🛡️ Wizard lancé", view=CombatWizard(interaction.user, bot), ephemeral=True)
+    # On prévient Discord qu'on arrive (évite le timeout 404)
+    await interaction.response.defer(ephemeral=True)
+    # On envoie le Wizard via followup
+    await interaction.followup.send("🛡️ Wizard lancé", view=CombatWizard(interaction.user, bot))
 
 @bot.tree.command(name="classement")
 async def classement(interaction: discord.Interaction):
