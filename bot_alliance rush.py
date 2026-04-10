@@ -3,7 +3,6 @@ from discord.ext import commands, tasks
 from discord import app_commands
 import os
 import threading
-import asyncio  # Ajouté pour la gestion du Timeout
 from pymongo import MongoClient
 from flask import Flask
 from dotenv import load_dotenv
@@ -14,16 +13,11 @@ app = Flask('')
 MONGO_URL = os.getenv("MONGO_URL")
 TOKEN = os.getenv("DISCORD_TOKEN")
 
-# Connexion MongoDB avec sécurité
-try:
-    client = MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000)
-    client.server_info()  # Test de connexion
-    db = client["alliance_rush"]
-    users_col = db["users"]
-    config_col = db["config"]
-    print("✅ Connecté à MongoDB avec succès")
-except Exception as e:
-    print(f"❌ Erreur de connexion MongoDB : {e}")
+# Connexion MongoDB
+client = MongoClient(MONGO_URL)
+db = client["alliance_rush"]
+users_col = db["users"]
+config_col = db["config"]
 
 # IDs des Salons
 DASHBOARD_CHANNEL_ID = 1473418141160837140
@@ -42,15 +36,22 @@ def load_data():
         data["users"][user["user_id"]] = user
     return data
 
-def db_update_user(uid, name, guilde, pts, win):
+def db_update_user(uid, name, guilde, pts, win, screen_url=None):
     win_inc = 1 if win else 0
     loss_inc = 0 if win else 1
+    
+    update_data = {
+        "$set": {"name": name, "guilde": guilde},
+        "$inc": {"pts_perco": float(pts), "wins": win_inc, "losses": loss_inc}
+    }
+    
+    # Ajout du lien du screen s'il existe
+    if screen_url:
+        update_data["$set"]["last_screen"] = screen_url
+
     users_col.update_one(
         {"user_id": str(uid)},
-        {
-            "$set": {"name": name, "guilde": guilde},
-            "$inc": {"pts_perco": float(pts), "wins": win_inc, "losses": loss_inc}
-        },
+        update_data,
         upsert=True
     )
 
@@ -127,13 +128,18 @@ def build_player_rank(data):
         emb.description = "Aucune donnée."
         return emb
     sorted_u = sorted(scores.items(), key=lambda x: x[1].get('pts_perco', 0), reverse=True)[:15]
-    table = "```\n# Joueur        | Pts  | W | L | %\n" + "-"*37 + "\n"
+    
+    # On utilise des puces pour que les liens Markdown fonctionnent
+    table = "**Joueur | Pts | W | L | Preuve**\n" + "-"*35 + "\n"
     for uid, d in sorted_u:
         name = d.get("name", "Inconnu")[:12].ljust(13)
         pts = d.get('pts_perco', 0.0); w, l = d.get('wins', 0), d.get('losses', 0)
-        ratio = (w / (w+l) * 100) if (w+l) > 0 else 0
-        table += f"{name} | {pts:>4.1f} | {w:>1} | {l:>1} | {ratio:>3.0f}%\n"
-    emb.description = table + "```"
+        screen = d.get('last_screen')
+        preuve = f"[📸]({screen})" if screen else "---"
+        
+        table += f"• `{name} | {pts:>4.1f} | {w} | {l}` | {preuve}\n"
+    
+    emb.description = table
     return emb
 
 def build_guild_rank(data):
@@ -271,75 +277,69 @@ class CombatWizard(discord.ui.View):
         if self.mixte: pts += float(cfg.get("bonus_mixte", 1))
         if self.long_combat and win: pts += float(cfg.get("bonus_long", 1))
 
-        msg_end = f"🏁 **{pts} pts/joueur.** Envoie le SCREEN dans ce salon !"
+        msg_end = f"🏁 **{pts} pts/joueur.** Envoie le SCREEN !"
         if interaction.response.is_done(): await interaction.followup.send(content=msg_end, view=None, ephemeral=True)
         else: await interaction.response.edit_message(content=msg_end, view=None)
-            
+        
         try:
             msg = await self.bot.wait_for("message", check=lambda m: m.author == self.user and m.attachments, timeout=300)
             data = load_data(); summary = ""
+            
+            # On envoie le screen d'abord pour avoir l'URL
+            target_ch = self.bot.get_channel(CH_DEFENSE if self.type_combat == "Perco_Def" else CH_ATTAQUE)
+            screen_url = None
+            if target_ch:
+                # Création d'un résumé rapide pour le salon log
+                log_summary = "\n".join([f"• {p['name']}" for p in self.participants])
+                sent_msg = await target_ch.send(f"✅ **{self.type_combat}** ({pts} pts)\n{log_summary}", file=await msg.attachments[0].to_file())
+                screen_url = sent_msg.attachments[0].url
+
             for p in self.participants:
                 uid = p["id"]
                 u_info = data["users"].get(uid, {"name": p["name"], "guilde": "À Définir"})
-                db_update_user(uid, p["name"], u_info["guilde"], pts, win)
+                db_update_user(uid, p["name"], u_info["guilde"], pts, win, screen_url)
                 summary += f"• {p['name']} ({u_info['guilde']})\n"
             
-            target_ch = self.bot.get_channel(CH_DEFENSE if self.type_combat == "Perco_Def" else CH_ATTAQUE)
-            if target_ch: await target_ch.send(f"✅ **{self.type_combat}** ({pts} pts)\n{summary}", file=await msg.attachments[0].to_file())
-            await msg.reply(f"✅ Combat enregistré pour {len(self.participants)} joueurs (+{pts} pts) !")
-        except asyncio.TimeoutError:
-            await self.user.send("⚠️ Temps écoulé (5min) pour envoyer le screen. Le combat n'a pas été enregistré.")
+            await msg.reply(f"✅ Enregistré (+{pts} pts) !")
+        except Exception as e:
+            print(f"Erreur finish: {e}")
 
 # --- SETUP BOT ---
 class RushBot(commands.Bot):
     def __init__(self): super().__init__(command_prefix="!", intents=discord.Intents.all())
-    async def setup_hook(self): 
-        self.update_dashboard.start()
-        await self.tree.sync()
+    async def setup_hook(self): self.update_dashboard.start(); await self.tree.sync()
 
     @tasks.loop(minutes=5)
     async def update_dashboard(self):
         ch = self.get_channel(DASHBOARD_CHANNEL_ID)
         if ch:
-            try:
-                data = load_data()
-                await ch.purge(limit=10, check=lambda m: m.author == self.user)
-                await ch.send(embed=build_player_rank(data))
-                await ch.send(embed=build_guild_rank(data))
-            except Exception as e:
-                print(f"Erreur Dashboard : {e}")
+            data = load_data(); await ch.purge(limit=5, check=lambda m: m.author == self.user)
+            await ch.send(embed=build_player_rank(data)); await ch.send(embed=build_guild_rank(data))
 
 bot = RushBot()
 
-@bot.tree.command(name="ajouter_combat", description="Lancer le wizard de combat")
+@bot.tree.command(name="ajouter_combat")
 async def add(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     await interaction.followup.send("🛡️ Wizard lancé", view=CombatWizard(interaction.user, bot))
 
-@bot.tree.command(name="classement", description="Afficher le classement actuel")
+@bot.tree.command(name="classement")
 async def classement(interaction: discord.Interaction):
-    data = load_data()
-    await interaction.response.send_message(embeds=[build_player_rank(data), build_guild_rank(data)])
+    data = load_data(); await interaction.response.send_message(embeds=[build_player_rank(data), build_guild_rank(data)])
 
-@bot.tree.command(name="admin_panel", description="Accès administrateur au barème")
+@bot.tree.command(name="admin_panel")
 @app_commands.checks.has_permissions(administrator=True)
 async def admin(interaction: discord.Interaction):
-    await interaction.response.send_message("⚙️ CONFIGURATION DU BARÈME", view=ConfigPanel(), ephemeral=True)
+    await interaction.response.send_message("⚙️ CONFIGURATION", view=ConfigPanel(), ephemeral=True)
 
-@bot.tree.command(name="reset_classement", description="Réinitialiser toutes les données")
+@bot.tree.command(name="reset_classement")
 @app_commands.checks.has_permissions(administrator=True)
 async def reset(interaction: discord.Interaction):
-    await interaction.response.send_message("🚨 Êtes-vous sûr de vouloir tout supprimer ?", view=ResetConfirmView(), ephemeral=True)
+    await interaction.response.send_message("🚨 Reset ?", view=ResetConfirmView(), ephemeral=True)
 
-# --- FLASK SERVER (POUR RENDER) ---
 @app.route('/')
-def home(): 
-    return "Bot Online - Status: 200 OK"
+def home(): return "Bot MongoDB Atlas Online !"
 
 if __name__ == "__main__":
-    # Récupération du port dynamique de Render
-    port = int(os.environ.get("PORT", 5000))
-    # Lancement de Flask dans un thread séparé
-    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=port), daemon=True).start()
-    # Lancement du Bot Discord
+    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=10000), daemon=True).start()
     bot.run(TOKEN)
