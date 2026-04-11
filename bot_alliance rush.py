@@ -19,12 +19,12 @@ db = client["alliance_rush"]
 users_col = db["users"]
 config_col = db["config"]
 
-# IDs des Salons
+# IDs des Salons (Assure-toi que ces IDs sont corrects)
 DASHBOARD_CHANNEL_ID = 1473418141160837140
 CH_ATTAQUE = 1470492327679230156
 CH_DEFENSE = 1470492446885544059
 
-# LISTE DES GUILDES MISE À JOUR
+# LISTE DES GUILDES
 ALLIANCE_GUILDES = [
     "OLYMPE", "EXODE", "LACOSTE TN", "THE UNKNOWNS",
     "OLD SCHOOL", "NONOOB", "STELLAR", "DEVIANCE"
@@ -210,27 +210,42 @@ class CombatWizard(discord.ui.View):
     async def check_guilds(self, interaction):
         if not self.participants:
             return await interaction.response.send_message("❌ Ajoutez au moins un joueur !", ephemeral=True)
-        if not interaction.response.is_done():
-            await interaction.response.defer(ephemeral=True)
+        
         data = load_data()
         self.pending_members = [p for p in self.participants if p["id"] not in data["users"]]
-        if self.pending_members: await self.ask_next_guild_config(interaction)
-        else: await self.proceed_to_format(interaction)
+        
+        if self.pending_members: 
+            await self.ask_next_guild_config(interaction)
+        else: 
+            await self.proceed_to_format(interaction)
 
     async def ask_next_guild_config(self, interaction):
-        if not self.pending_members: await self.proceed_to_format(interaction); return
-        curr = self.pending_members[0]; self.clear_items()
+        if not self.pending_members: 
+            await self.proceed_to_format(interaction)
+            return
+
+        curr = self.pending_members[0]
+        self.clear_items()
         sel = discord.ui.Select(placeholder=f"Guilde de {curr['name']} ?", options=[discord.SelectOption(label=g) for g in ALLIANCE_GUILDES])
+        
         async def guild_cb(i):
             db_update_user(curr["id"], curr["name"], sel.values[0], 0, True)
-            self.pending_members.pop(0); await self.ask_next_guild_config(i)
-        sel.callback = guild_cb; self.add_item(sel)
+            self.pending_members.pop(0)
+            await self.ask_next_guild_config(i)
+            
+        sel.callback = guild_cb
+        self.add_item(sel)
+        
         msg = f"⚙️ Guilde de **{curr['name']}** ?"
-        if interaction.response.is_done(): await interaction.followup.send(content=msg, view=self, ephemeral=True)
-        else: await interaction.response.edit_message(content=msg, view=self)
+        if interaction.response.is_done():
+            await interaction.edit_original_response(content=msg, view=self)
+        else:
+            await interaction.response.edit_message(content=msg, view=self)
 
     async def proceed_to_format(self, interaction):
-        if self.type_combat == "Perco_Def": self.format = "4v4"; await self.show_issue(interaction)
+        if self.type_combat == "Perco_Def": 
+            self.format = "4v4"
+            await self.show_issue(interaction)
         else:
             self.clear_items()
             for f_l, f_v in [("4v4 Full", "4v4"), ("4v3/2", "4v3/2"), ("4v1/0", "4v1/0")]:
@@ -239,9 +254,12 @@ class CombatWizard(discord.ui.View):
                     async def cb(it): self.format = v; await self.show_issue(it)
                     return cb
                 btn.callback = mk_cb(f_v); self.add_item(btn)
+            
             msg = "**Étape 3 :** Format adverse ?"
-            if interaction.response.is_done(): await interaction.followup.send(content=msg, view=self, ephemeral=True)
-            else: await interaction.response.edit_message(content=msg, view=self)
+            if interaction.response.is_done():
+                await interaction.edit_original_response(content=msg, view=self)
+            else:
+                await interaction.response.edit_message(content=msg, view=self)
 
     async def show_issue(self, i):
         self.clear_items()
@@ -251,8 +269,12 @@ class CombatWizard(discord.ui.View):
                 async def cb(it): self.issue = r; await self.show_bonus(it)
                 return cb
             btn.callback = mk_cb(res); self.add_item(btn)
-        if i.response.is_done(): await i.followup.send(content="**Étape 4 :** Résultat ?", view=self, ephemeral=True)
-        else: await i.response.edit_message(content="**Étape 4 :** Résultat ?", view=self)
+        
+        msg = "**Étape 4 :** Résultat ?"
+        if i.response.is_done():
+            await i.edit_original_response(content=msg, view=self)
+        else:
+            await i.response.edit_message(content=msg, view=self)
 
     async def show_bonus(self, i):
         self.clear_items()
@@ -262,8 +284,12 @@ class CombatWizard(discord.ui.View):
         bl.callback = lambda it: self.toggle_bonus(it, "long")
         vf = discord.ui.Button(label="VALIDER", style=discord.ButtonStyle.green, row=1)
         vf.callback = self.finish; self.add_item(bm); self.add_item(bl); self.add_item(vf)
-        if i.response.is_done(): await i.followup.send(content="**Étape 5 :** Bonus ?", view=self, ephemeral=True)
-        else: await i.response.edit_message(content="**Étape 5 :** Bonus ?", view=self)
+        
+        msg = "**Étape 5 :** Bonus ?"
+        if i.response.is_done():
+            await i.edit_original_response(content=msg, view=self)
+        else:
+            await i.response.edit_message(content=msg, view=self)
 
     async def toggle_bonus(self, it, type_b):
         if type_b == "mixte": self.mixte = not self.mixte
@@ -277,12 +303,15 @@ class CombatWizard(discord.ui.View):
             elif self.format == "4v4" and self.long_combat: pts = float(cfg["Prisme"].get("perdu_long", 1))
         elif self.type_combat == "Perco_Atk" and win: pts = float(cfg["Perco_Atk"].get(self.format, 1))
         elif self.type_combat == "Perco_Def" and win: pts = float(cfg["Perco_Def"].get("win", 2))
+        
         if self.mixte: pts += float(cfg.get("bonus_mixte", 1))
         if self.long_combat and win: pts += float(cfg.get("bonus_long", 1))
 
-        msg_end = f"🏁 **{pts} pts/joueur.** Envoie le SCREEN !"
-        if interaction.response.is_done(): await interaction.followup.send(content=msg_end, view=None, ephemeral=True)
-        else: await interaction.response.edit_message(content=msg_end, view=None)
+        msg_end = f"🏁 **{pts} pts/joueur.** Envoie le SCREEN (Preuve) dans ce salon !"
+        if interaction.response.is_done():
+            await interaction.edit_original_response(content=msg_end, view=None)
+        else:
+            await interaction.response.edit_message(content=msg_end, view=None)
         
         try:
             msg = await self.bot.wait_for("message", check=lambda m: m.author == self.user and m.attachments, timeout=300)
@@ -301,7 +330,7 @@ class CombatWizard(discord.ui.View):
                 db_update_user(uid, p["name"], u_info["guilde"], pts, win, screen_url)
                 summary += f"• {p['name']} ({u_info['guilde']})\n"
             
-            await msg.reply(f"✅ Enregistré (+{pts} pts) !")
+            await msg.reply(f"✅ Combat enregistré avec succès (+{pts} pts) !")
             await self.bot.refresh_dashboard()
             
         except Exception as e:
@@ -309,41 +338,63 @@ class CombatWizard(discord.ui.View):
 
 # --- SETUP BOT ---
 class RushBot(commands.Bot):
-    def __init__(self): super().__init__(command_prefix="!", intents=discord.Intents.all())
-    async def setup_hook(self): await self.tree.sync()
+    def __init__(self): 
+        # On utilise Intents.all() car tu gères des messages et des membres
+        super().__init__(command_prefix="!", intents=discord.Intents.all())
+
+    async def setup_hook(self):
+        # Cette étape prépare la synchro des commandes slash
+        print("Hook de configuration lancé...")
+
+    async def on_ready(self):
+        # On force la synchronisation des commandes slash au démarrage
+        await self.tree.sync()
+        print(f"Connecté en tant que {self.user} (ID: {self.user.id})")
+        print("Commandes Slash synchronisées avec succès.")
 
     async def refresh_dashboard(self):
         ch = self.get_channel(DASHBOARD_CHANNEL_ID)
         if ch:
             data = load_data()
-            await ch.purge(limit=5, check=lambda m: m.author == self.user)
+            try:
+                await ch.purge(limit=5, check=lambda m: m.author == self.user)
+            except:
+                pass # Évite de crash si pas de permission de purge
             await ch.send(embed=build_player_rank(data))
             await ch.send(embed=build_guild_rank(data))
 
 bot = RushBot()
 
-@bot.tree.command(name="ajouter_combat")
+@bot.tree.command(name="ajouter_combat", description="Lancer l'assistant d'ajout de combat")
 async def add(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    await interaction.followup.send("🛡️ Wizard lancé", view=CombatWizard(interaction.user, bot))
+    # On utilise ephemeral=True pour ne pas polluer le salon
+    await interaction.response.send_message("🛡️ Assistant de combat lancé...", view=CombatWizard(interaction.user, bot), ephemeral=True)
 
-@bot.tree.command(name="classement")
+@bot.tree.command(name="classement", description="Afficher le classement actuel")
 async def classement(interaction: discord.Interaction):
-    data = load_data(); await interaction.response.send_message(embeds=[build_player_rank(data), build_guild_rank(data)])
+    data = load_data()
+    await interaction.response.send_message(embeds=[build_player_rank(data), build_guild_rank(data)])
 
-@bot.tree.command(name="admin_panel")
+@bot.tree.command(name="admin_panel", description="Accéder aux réglages du barème")
 @app_commands.checks.has_permissions(administrator=True)
 async def admin(interaction: discord.Interaction):
-    await interaction.response.send_message("⚙️ CONFIGURATION", view=ConfigPanel(), ephemeral=True)
+    await interaction.response.send_message("⚙️ CONFIGURATION DU BARÈME", view=ConfigPanel(), ephemeral=True)
 
-@bot.tree.command(name="reset_classement")
+@bot.tree.command(name="reset_classement", description="Réinitialiser toutes les données (Admin uniquement)")
 @app_commands.checks.has_permissions(administrator=True)
 async def reset(interaction: discord.Interaction):
-    await interaction.response.send_message("🚨 Reset ?", view=ResetConfirmView(bot), ephemeral=True)
+    await interaction.response.send_message("🚨 **ATTENTION :** Voulez-vous vraiment supprimer toutes les données du classement ?", view=ResetConfirmView(bot), ephemeral=True)
 
+# --- FLASK (POUR LE RENDU / KEEP ALIVE) ---
 @app.route('/')
-def home(): return "Bot MongoDB Atlas Online !"
+def home(): 
+    return "Bot MongoDB Atlas Online !"
+
+def run_flask():
+    app.run(host='0.0.0.0', port=10000)
 
 if __name__ == "__main__":
-    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=10000), daemon=True).start()
+    # Lancement du serveur Web dans un thread séparé
+    threading.Thread(target=run_flask, daemon=True).start()
+    # Lancement du Bot
     bot.run(TOKEN)
